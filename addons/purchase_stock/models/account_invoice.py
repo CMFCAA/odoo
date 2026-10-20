@@ -40,7 +40,8 @@ class AccountMove(models.Model):
             for line in move.invoice_line_ids:
                 # Filter out lines being not eligible for price difference.
                 # Moreover, this function is used for standard cost method only.
-                if not line._eligible_for_cogs() or line.product_id.cost_method != 'standard':
+                # We also filter out services to filter out landed costs (they are eligible for cogs but we want to filter them out here)
+                if not line._eligible_for_cogs() or line.product_id.type == 'service' or line.product_id.cost_method != 'standard':
                     continue
 
                 # Retrieve accounts needed to generate the price difference.
@@ -76,15 +77,16 @@ class AccountMove(models.Model):
                         'quantity': relevant_qty,
                         'price_unit': price_unit_val_dif,
                         'price_subtotal': relevant_qty * price_unit_val_dif,
-                        'amount_currency': relevant_qty * price_unit_val_dif * line.move_id.direction_sign,
+                        'amount_currency': relevant_qty * price_unit_val_dif,
                         'balance': line.currency_id._convert(
-                            relevant_qty * price_unit_val_dif * line.move_id.direction_sign,
+                            relevant_qty * price_unit_val_dif,
                             line.company_currency_id,
                             line.company_id, fields.Date.today(),
                         ),
                         'account_id': debit_pdiff_account.id,
                         'analytic_distribution': line.analytic_distribution,
                         'display_type': 'cogs',
+                        'tax_ids': [],
                     }
                     lines_vals_list.append(vals)
 
@@ -99,15 +101,16 @@ class AccountMove(models.Model):
                         'quantity': relevant_qty,
                         'price_unit': -price_unit_val_dif,
                         'price_subtotal': relevant_qty * -price_unit_val_dif,
-                        'amount_currency': relevant_qty * -price_unit_val_dif * line.move_id.direction_sign,
+                        'amount_currency': relevant_qty * -price_unit_val_dif,
                         'balance': line.currency_id._convert(
-                            relevant_qty * -price_unit_val_dif * line.move_id.direction_sign,
+                            relevant_qty * -price_unit_val_dif,
                             line.company_currency_id,
                             line.company_id, fields.Date.today(),
                         ),
                         'account_id': line.account_id.id,
                         'analytic_distribution': line.analytic_distribution,
                         'display_type': 'cogs',
+                        'tax_ids': [],
                     }
                     lines_vals_list.append(vals)
         return lines_vals_list

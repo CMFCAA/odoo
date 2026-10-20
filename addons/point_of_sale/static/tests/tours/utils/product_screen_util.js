@@ -5,6 +5,7 @@ import * as PartnerList from "@point_of_sale/../tests/tours/utils/partner_list_u
 import * as TextInputPopup from "@point_of_sale/../tests/tours/utils/text_input_popup_util";
 import * as Dialog from "@point_of_sale/../tests/tours/utils/dialog_util";
 import * as Chrome from "@point_of_sale/../tests/tours/utils/chrome_util";
+import * as PaymentScreen from "@point_of_sale/../tests/tours/utils/payment_screen_util";
 
 export function clickLine(productName, quantity = "1.0") {
     return [
@@ -38,6 +39,34 @@ export function selectFloatingOrder(index) {
         },
     ];
 }
+
+export function checkFloatingOrderCount(expectedCount) {
+    return [
+        {
+            isActive: ["mobile"],
+            trigger: ".fa-caret-down",
+            run: "click",
+        },
+        {
+            content: `check there are ${expectedCount} floating order`,
+            trigger: ".list-container-items .btn",
+            run: () => {
+                const btns = document.querySelectorAll(".list-container-items .btn");
+                if (btns.length !== expectedCount) {
+                    throw new Error(
+                        `Expected ${expectedCount} floating order buttons, found ${btns.length}`
+                    );
+                }
+            },
+        },
+        {
+            isActive: ["mobile"],
+            trigger: ".modal-header .oi-arrow-left",
+            run: "click",
+        },
+    ];
+}
+
 /**
  * Generates a sequence of actions to click on a displayed product, with optional additional
  * checks based on specific needs such as the next quantity and the next price.
@@ -379,6 +408,14 @@ export function checkFiscalPosition(name) {
         Dialog.cancel(),
     ];
 }
+export function checkFiscalPositionButton() {
+    return [
+        {
+            content: "click fiscal position button",
+            trigger: ".o_fiscal_position_button",
+        },
+    ];
+}
 export function closeWithCashAmount(val) {
     return [
         {
@@ -499,6 +536,22 @@ export function productIsDisplayed(name, position = -1) {
             trigger: `.product-list ${
                 position > -1 ? `article:eq(${position})` : ""
             } .product-name:contains("${name}")`,
+        },
+    ];
+}
+export function productCardCountIs(name, count) {
+    return [
+        {
+            content: `'${name}' should be displayed ${count} time(s)`,
+            trigger: `.product-list .product-name:contains("${name}")`,
+            run: () => {
+                const found = [...document.querySelectorAll(".product-list .product-name")].filter(
+                    (el) => el.textContent.trim() === name
+                ).length;
+                if (found !== count) {
+                    throw new Error(`Expected ${count} '${name}' product card(s), found ${found}`);
+                }
+            },
         },
     ];
 }
@@ -648,18 +701,7 @@ export function closePos() {
 
 export function finishOrder() {
     return [
-        {
-            isActive: ["desktop"],
-            content: "validate the order",
-            trigger: ".payment-screen .button.next.highlight:visible",
-            run: "click",
-        },
-        {
-            isActive: ["mobile"],
-            content: "validate the order",
-            trigger: ".payment-screen .btn-switchpane:contains('Validate')",
-            run: "click",
-        },
+        ...PaymentScreen.clickValidate(),
         Chrome.isSyncStatusConnected(),
         {
             isActive: ["desktop"],
@@ -702,4 +744,15 @@ export function addDiscount(discount) {
             .split("")
             .flatMap((key) => Numpad.click(key)),
     ].flat();
+}
+
+export function saveOrder() {
+    return [
+        clickReview(),
+        {
+            content: "save order",
+            trigger: ".pads .fa-upload",
+            run: "click",
+        },
+    ];
 }

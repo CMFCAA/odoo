@@ -28,7 +28,7 @@ class IrActionsReport(models.Model):
 
         collected_streams = OrderedDict()
         for invoice in invoices:
-            attachment = invoice.message_main_attachment_id
+            attachment = self._prepare_local_attachments(invoice.message_main_attachment_id)
             if attachment:
                 stream = pdf.to_pdf_stream(attachment)
                 if stream:
@@ -78,7 +78,7 @@ class IrActionsReport(models.Model):
     def _unlink_except_master_tags(self):
         master_xmlids = [
             "account_invoices",
-            "action_account_original_vendor_bill"
+            "action_account_original_vendor_bill",
             "account_invoices_without_payment",
             "action_report_journal",
             "action_report_payment_receipt",

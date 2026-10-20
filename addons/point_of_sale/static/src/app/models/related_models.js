@@ -163,7 +163,7 @@ export class Base {
         }
     }
 
-    setDirty() {
+    setDirty(skip = false) {
         if (typeof this.id === "number") {
             this.models.commands[this.model.modelName].update.add(this.id);
         }
@@ -261,11 +261,20 @@ export class Base {
                     const unlinks = this.getCommand("unlink", name);
                     const deletes = this.getCommand("delete", name);
                     if (unlinks || deletes) {
+                        // Removal commands are kept until the order is synced, so a record
+                        // reloaded from the server in the meantime is linked again while its
+                        // removal is still pending. Sending both would write the record and
+                        // then drop it, since the ORM applies the commands in order.
+                        const linkedIds = new Set(serializedData[name]);
                         for (const id of unlinks || []) {
-                            serializedDataOrm[name].push([3, id]);
+                            if (!linkedIds.has(id)) {
+                                serializedDataOrm[name].push([3, id]);
+                            }
                         }
                         for (const id of deletes || []) {
-                            serializedDataOrm[name].push([2, id]);
+                            if (!linkedIds.has(id)) {
+                                serializedDataOrm[name].push([2, id]);
+                            }
                         }
                         if (clear) {
                             this.deleteCommand("unlink", name);
@@ -654,13 +663,33 @@ export function createRelatedModels(modelDefs, modelClasses = {}, opts = {}) {
                             connect(field, record, record2);
                         }
                     } else if (type === "set") {
+                        // Set can only be used on One2many and Many2many records. Since we are
+                        // using “Set,” we can manually disconnect all previous relationships
+                        // to avoid performance issues.
                         const linkedRecs = record[name];
+                        const inverse = inverseMap.get(field);
                         const existingRecords = items.filter((record) =>
                             exists(comodelName, record.id)
                         );
-                        for (const record2 of [...linkedRecs]) {
-                            disconnect(field, record, record2);
+
+                        // Disconnect `record` from all previously linked records
+                        for (const linkedRec of [...linkedRecs]) {
+                            if (!linkedRec[inverse.name]) {
+                                continue;
+                            }
+
+                            if (field.type === "one2many") {
+                                linkedRec[inverse.name] = undefined;
+                            } else {
+                                removeItem(linkedRec, inverse.name, record);
+                            }
                         }
+
+                        // Clear indexes and linked records from `record`
+                        record.getIndexMaps(name).clear();
+                        record[name] = [];
+
+                        // Reconnect new records
                         for (const record2 of existingRecords) {
                             connect(field, record, record2);
                         }
@@ -974,6 +1003,7 @@ export function createRelatedModels(modelDefs, modelClasses = {}, opts = {}) {
     function loadData(rawData, load = [], fromSerialized = false) {
         const results = {};
         const ignoreConnection = {};
+        const modelToSetup = [];
 
         for (const model in rawData) {
             ignoreConnection[model] = [];
@@ -1045,7 +1075,7 @@ export function createRelatedModels(modelDefs, modelClasses = {}, opts = {}) {
                     }
 
                     oldRecord.update(record, { silent: true });
-                    oldRecord.setup(record);
+                    modelToSetup.push({ raw: record, record: oldRecord });
                     ignoreConnection[model].push(record.id);
                     results[model].push(oldRecord);
                     Object.assign(baseData[model][record.id], raw);
@@ -1058,7 +1088,6 @@ export function createRelatedModels(modelDefs, modelClasses = {}, opts = {}) {
         }
 
         const alreadyLinkedSet = new Set();
-        const modelToSetup = [];
 
         // link the related records
         for (const model in rawData) {

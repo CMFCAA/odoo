@@ -2,7 +2,7 @@ import { _t } from "@web/core/l10n/translation";
 import { Dialog } from "@web/core/dialog/dialog";
 import { evaluateBooleanExpr } from "@web/core/py_js/py";
 import { editModelDebug } from "@web/core/debug/debug_utils";
-import { formatDateTime, deserializeDateTime } from "@web/core/l10n/dates";
+import { formatDate, formatDateTime, deserializeDateTime } from "@web/core/l10n/dates";
 import { registry } from "@web/core/registry";
 import { useService } from "@web/core/utils/hooks";
 import { formatMany2one } from "@web/views/fields/formatters";
@@ -170,6 +170,20 @@ export function viewMetadata({ component, env }) {
 
 debugRegistry.category("form").add("viewMetadata", viewMetadata);
 
+function sortKeysDeep(obj) {
+    if (Array.isArray(obj)) {
+        return obj.map(sortKeysDeep);
+    } else if (obj && typeof obj === "object") {
+        return Object.keys(obj)
+            .sort()
+            .reduce((result, key) => {
+                result[key] = sortKeysDeep(obj[key]);
+                return result;
+            }, {});
+    }
+    return obj;
+}
+
 // -----------------------------------------------------------------------------
 // View Raw Record Data
 // -----------------------------------------------------------------------------
@@ -188,7 +202,7 @@ class RawRecordDialog extends Component {
     };
     get content() {
         const record = this.props.record;
-        return JSON.stringify(record, Object.keys(record).sort(), 2);
+        return JSON.stringify(sortKeysDeep(record), null, 2);
     }
 }
 
@@ -203,7 +217,8 @@ export function viewRawRecord({ component, env }) {
         description,
         callback: async () => {
             const serializableFields = Object.entries(fields).reduce(
-                (acc, [k, v]) => v.type !== "binary" ? acc.concat(k) : acc, []
+                (acc, [k, v]) => (v.type !== "binary" && !v.propertyName ? acc.concat(k) : acc),
+                []
             );
             const records = await component.model.orm.read(resModel, [resId], serializableFields);
             env.services.dialog.add(RawRecordDialog, {
@@ -311,6 +326,10 @@ class SetDefaultDialog extends Component {
             displayed = fieldInfo.selection.find((option) => {
                 return option[0] === value;
             })[1];
+        } else if (value && fieldInfo.type === "date") {
+            displayed = formatDate(value);
+        } else if (value && fieldInfo.type === "datetime") {
+            displayed = formatDateTime(value);
         }
         if (
             (typeof displayed === "string" || displayed instanceof String) &&
@@ -329,9 +348,10 @@ class SetDefaultDialog extends Component {
             return field.name === this.state.fieldToSet;
         }).value;
 
-        if (fieldToSet.constructor.name.toLowerCase() === "date") {
+        const fieldType = this.fields[this.state.fieldToSet].type;
+        if (fieldType === "date") {
             fieldToSet = serializeDate(fieldToSet);
-        } else if (fieldToSet.constructor.name.toLowerCase() === "datetime") {
+        } else if (fieldType === "datetime") {
             fieldToSet = serializeDateTime(fieldToSet);
         }
         await this.orm.call("ir.default", "set", [

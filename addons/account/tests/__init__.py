@@ -27,6 +27,7 @@ from . import test_company_branch
 from . import test_digest
 from . import test_download_docs
 from . import test_fiscal_position
+from . import test_kpi_provider
 from . import test_sequence_mixin
 from . import test_tax
 from . import test_taxes_base_lines_tax_details
@@ -53,6 +54,7 @@ from . import test_setup_wizard
 from . import test_structured_reference
 from . import test_product
 from . import test_unexpected_invoice
+from . import test_mail_activity
 from . import test_mail_tracking_value
 from . import test_res_partner_merge
 from . import test_account_merge_wizard

@@ -9,8 +9,7 @@ from markupsafe import Markup
 from odoo import fields
 from odoo.exceptions import AccessError
 from odoo.addons.l10n_in_edi_ewaybill.models.error_codes import ERROR_CODES
-from odoo.tools import _, LazyTranslate
-_lt = LazyTranslate(__name__)
+from odoo.tools import _
 
 
 _logger = logging.getLogger(__name__)
@@ -45,12 +44,6 @@ class EWayBillError(Exception):
 
 
 class EWayBillApi:
-
-    DEFAULT_HELP_MESSAGE = _lt(
-        "Somehow this E-waybill has been %s in the government portal before. "
-        "You can verify by checking the details into the government "
-        "(https://ewaybillgst.gov.in/Others/EBPrintnew.asp)"
-    )
 
     def __init__(self, company):
         company.ensure_one()
@@ -125,7 +118,9 @@ class EWayBillApi:
                 })
                 raise
 
-            if '238' in e.error_codes:
+            if '238' in e.error_codes or any(
+                'the token is missing or has expired' in str(err.get('message', '')).lower() for err in e.error_json['error']
+            ):
                 # Invalid token eror then create new token and send generate request again.
                 # This happens when authenticate called from another odoo instance with same credentials
                 # (like. Demo/Test)
@@ -143,7 +138,9 @@ class EWayBillApi:
                 return {
                     'odoo_warning': [{
                         'message': Markup("%s<br/>%s:<br/>%s") % (
-                            self.DEFAULT_HELP_MESSAGE % 'cancelled',
+                            self.env['l10n.in.ewaybill']._get_default_help_message(
+                                self.env._('cancelled')
+                            ),
                             _("Error"),
                             e.get_all_error_message()
                         ),
@@ -178,7 +175,9 @@ class EWayBillApi:
         # Add warning that ewaybill was already generated
         response.update({
             'odoo_warning': [{
-                'message': self.DEFAULT_HELP_MESSAGE % 'generated',
+                'message': self.env['l10n.in.ewaybill']._get_default_help_message(
+                    self.env._('generated')
+                ),
                 'message_post': True
             }]
         })

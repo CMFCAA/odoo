@@ -4,6 +4,7 @@ import {
     BasicEditor,
     testEditor,
     pasteHtml,
+    unformat,
 } from "../utils.js";
 
 // The tests below are very sensitive to whitespaces as they do represent actual
@@ -242,7 +243,7 @@ describe('Paste HTML tables', () => {
             <tr>
                 <td>14pt MONO TEXT
                 </td>
-            </tr>
+            <td><br></td></tr>
         </tbody></table><p>
     
 
@@ -357,7 +358,7 @@ describe('Paste HTML tables', () => {
             </tr>
             <tr>
                 <td>14pt MONO TEXT</td>
-            </tr>
+            <td><br></td></tr>
         </tbody>
     </table><p>
 []</p>`,
@@ -489,12 +490,86 @@ describe('Paste HTML tables', () => {
             <td>
                 14pt MONO TEXT
             </td>
-        </tr>
+        <td><br></td></tr>
     </tbody></table><p>
 
 
 []</p>`,
             });
+        });
+    });
+    it("should move all rows from thead to tbody", async () => {
+        await testEditor(BasicEditor, {
+            contentBefore: '<p>[]</p>',
+            stepFunction: async editor => {
+                await pasteHtml(editor, unformat(`
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>1</th>
+                                <th>2</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>1</td>
+                                <td>2</td>
+                            </tr>
+                            <tr>
+                                <td>1</td>
+                                <td>2</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                `));
+            },
+            contentAfter: unformat(`
+                    <table class="table table-bordered">
+                        <tbody>
+                            <tr>
+                                <td>1</td>
+                                <td>2</td>
+                            </tr>
+                            <tr>
+                                <td>1</td>
+                                <td>2</td>
+                            </tr>
+                            <tr>
+                                <td>1</td>
+                                <td>2</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p>[]<br></p>
+            `),
+        });
+    });
+    it("should replace thead element with tbody", async () => {
+        await testEditor(BasicEditor, {
+            contentBefore: '<p>[]</p>',
+            stepFunction: async editor => {
+                await pasteHtml(editor, unformat(`
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>1</th>
+                                <th>2</th>
+                            </tr>
+                        </thead>
+                    </table>
+                `));
+            },
+            contentAfter: unformat(`
+                    <table class="table table-bordered">
+                        <tbody>
+                            <tr>
+                                <td>1</td>
+                                <td>2</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p>[]<br></p>
+            `),
         });
     });
 });

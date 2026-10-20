@@ -12,6 +12,7 @@ import { Record, Store, makeStore } from "@mail/core/common/record";
 import { AND, Markup } from "@mail/model/misc";
 import { registry } from "@web/core/registry";
 import { serializeDateTime } from "@web/core/l10n/dates";
+import { effect } from "@web/core/utils/reactive";
 
 describe.current.tags("desktop");
 defineMailModels();
@@ -928,6 +929,11 @@ test("record.toData() is JSON stringified and can be reinserted as record", asyn
         due_datetime = Record.attr(undefined, { type: "datetime" });
         messages = Record.many("Message");
         team = Record.one("Team");
+        isDiscuss = Record.attr(false, {
+            compute() {
+                return this.team === "Discuss";
+            },
+        });
     }).register(localRegistry);
     (class Message extends Record {
         static id = "body";
@@ -951,13 +957,23 @@ test("record.toData() is JSON stringified and can be reinserted as record", asyn
     expect(toRaw(store.Person.records[p.localId])).toBe(toRaw(p));
     expect(serializeDateTime(p.due_datetime)).toBe("2024-08-28 10:19:44");
     // export data, delete, then insert back
-    const data = JSON.parse(JSON.stringify(p.toData()));
+    const expectedData = {
+        id: 1,
+        due_datetime: "2024-08-28 10:19:44",
+        names: ["John", "Marc"],
+        messages: [{ body: "1" }, { body: "2" }],
+        team: { name: "Discuss" },
+    };
+    const data = p.toData();
+    // ensure no computed field or env
+    expect(data).toEqual(expectedData);
+    const serializedData = JSON.parse(JSON.stringify(data));
     p.delete();
     store.Message.get("1").delete();
     store.Message.get("2").delete();
     store.Team.get("Discuss").delete();
     expect(toRaw(store.Person.records[p.localId])).toBe(undefined);
-    const p2 = store.Person.insert(data);
+    const p2 = store.Person.insert(serializedData);
     // Same assertions as before
     expect(p2.names).toEqual(["John", "Marc"]);
     expect(p2.messages.map((msg) => msg.body)).toEqual(["1", "2"]);
@@ -1079,4 +1095,261 @@ test("Can assign new record on Many field with One inverse", async () => {
     expectRecord(thread.files[0]).toEqual(file2);
     expectRecord(file2.thread).toEqual(thread);
     expect(file1.thread).toBe(undefined);
+});
+
+test("Deleted records are not returned by 'Model.records' nor 'Model.get()'", async () => {
+    /**
+     * Record has a 2-step record deletion:
+     * - "soft" deletion, where the record is flagged for deletion but object is not removed from the store system structurally
+     * - "hard" deletion, where the object is fully removed from store system structurally
+     * The soft "deletion" is useful for stuffs like onDelete() hooks that tell which record has been removed from a relation,
+     * with object reference, even when the record will be hard-deleted as a consequence.
+     * `Model.records` and `Model.get()` are intended for business-code uses, therefore they should make sure to not return
+     * records that are soft-deleted, as this could lead to critical section where business code is using a deleted record.
+     */
+    function assertExists(store) {
+        const msg = store.Message.get("msg-1");
+        if (msg) {
+            expect(toRaw(msg).exists()).toBe(true);
+        }
+        for (const msg of Object.values(store.Message.records)) {
+            expect(toRaw(msg).exists()).toBe(true);
+        }
+    }
+    let deleting = false;
+    (class Thread extends Record {
+        static id = "name";
+        name;
+        messages = Record.many("Message", { inverse: "thread" });
+        get hasMessages() {
+            return this.messages.length > 0;
+        }
+    }).register(localRegistry);
+    (class Message extends Record {
+        static id = "content";
+        content;
+        thread = Record.one("Thread");
+    }).register(localRegistry);
+    (class DiscussApp extends Record {
+        static id = "id";
+        id;
+        thread = Record.one("Thread");
+        allMessagesInStore = Record.many("Message", {
+            compute() {
+                if (deleting) {
+                    expect.step("allMessagesInStore:compute");
+                    expect(this._lastAllMessagesInStore.some((m) => m.exists())).toBe(false);
+                }
+                expect(this.thread.hasMessages).toBe(
+                    Boolean(Object.values(store.Message.records).length > 0)
+                );
+                assertExists(this.store);
+                const allMessagesInStore = Object.values(store.Message.records);
+                toRaw(this)._raw._lastAllMessagesInStore = allMessagesInStore;
+                return allMessagesInStore;
+            },
+            eager: true,
+        });
+        _lastAllMessagesInStore;
+    }).register(localRegistry);
+    const store = await start();
+    const thread = store.Thread.insert({ name: "General" });
+    store.DiscussApp.insert({ thread });
+    const message = store.Message.insert({ content: "msg-1", thread });
+    expectRecord(thread.messages[0]).toEqual(message);
+    expectRecord(store.Message.get("msg-1")).toEqual(message);
+    expectRecord(store.Message.records[message.localId]).toEqual(message);
+    deleting = true;
+    message.delete();
+    deleting = false;
+    expect.verifySteps(["allMessagesInStore:compute"]);
+    assertExists(store);
+    expect(thread.messages.length).toEqual(0);
+});
+
+test("record.delete() should clear relation (inverse + computed)", async () => {
+    (class Thread extends Record {
+        static id = "name";
+        name;
+        members = Record.many("Member", {
+            inverse: "thread",
+            onDelete: (member) => member?.delete(),
+        });
+        onlineMembers = Record.many("Member", {
+            compute() {
+                return this.members.filter((member) => member.online);
+            },
+        });
+    }).register(localRegistry);
+    (class Member extends Record {
+        static id = "name";
+        name;
+        online = false;
+        thread = Record.one("Thread", { inverse: "members" });
+    }).register(localRegistry);
+    const store = await start();
+    const john = store.Member.insert({ name: "john", online: true });
+    const thread = store.Thread.insert({ name: "general", members: [john] });
+    expect(thread.onlineMembers.length).toBe(1);
+    thread.delete();
+    expect(john.exists()).toBe(false);
+    expect(thread.onlineMembers.length).toBe(0);
+});
+
+test("Delete record with side-effect compute to insert it should have resulting record with only insert data (old data is removed)'", async () => {
+    /**
+     * Record has a 2-step record deletion:
+     * - "soft" deletion, where the record is flagged for deletion but object is not removed from the store system structurally
+     * - "hard" deletion, where the object is fully removed from store system structurally
+     * The soft "deletion" is useful for stuffs like onDelete() hooks that tell which record has been removed from a relation,
+     * with object reference, even when the record will be hard-deleted as a consequence.
+     * `Model.records` and `Model.get()` are intended for business-code uses, therefore they should make sure to not return
+     * records that are soft-deleted, as this could lead to critical section where business code is using a deleted record.
+     */
+    (class DiscussApp extends Record {
+        static id;
+        state = Record.one("DiscussAppState", {
+            compute: () => ({}),
+            onDelete() {
+                this.state = {};
+            },
+        });
+    }).register(localRegistry);
+    (class DiscussAppState extends Record {
+        static id;
+        status = "init";
+        thread = Record.one("Thread");
+    }).register(localRegistry);
+    (class Thread extends Record {
+        static id = "name";
+        name;
+    }).register(localRegistry);
+    const store = await start();
+    const discussApp = store.DiscussApp.insert();
+    discussApp.state = { thread: "General", status: "ready" };
+    expect(discussApp.state.status).toEqual("ready");
+    expectRecord(discussApp.state.thread).toEqual(store.Thread.get("General"));
+    discussApp.state.delete();
+    expect(discussApp.state.status).toEqual("init");
+    expect(discussApp.state.thread).toBe(undefined);
+});
+
+test("side-effect of double deletion of record should work as expected with no crash'", async () => {
+    (class Channel extends Record {
+        static id = "name";
+        name;
+        correspondent = Record.one("Member", {
+            compute() {
+                return this.members[0];
+            },
+        });
+        members = Record.many("Member", {
+            onDelete: (r) => r.delete(),
+        });
+        parent = Record.one("Channel", {
+            onDelete() {
+                this.delete(); // important: triggers double-deletion when deleting sub-thread.
+            },
+        });
+        threads = Record.many("Channel", { inverse: "parent" });
+    }).register(localRegistry);
+    (class Member extends Record {
+        static id = "partner";
+        partner = Record.one("Partner");
+        channel = Record.one("Channel", { inverse: "members" });
+    }).register(localRegistry);
+    (class Partner extends Record {
+        static id = "name";
+        name;
+    }).register(localRegistry);
+    const store = await start();
+    const general = store.Channel.insert("general");
+    const suggestions = store.Channel.insert("Suggestions");
+    suggestions.parent = general;
+    const mitchell = store.Partner.insert("Mitchell");
+    const marc = store.Partner.insert("Marc");
+    const joel = store.Partner.insert("Joel");
+    general.members.push({ partner: mitchell });
+    general.members.push({ partner: marc });
+    general.members.push({ partner: joel });
+    suggestions.members.push({ partner: mitchell });
+    const reactiveGeneral = reactive(general, render);
+    function render() {
+        // Important: observe computed field `correspondent` lazily to trigger internal onChange
+        void reactiveGeneral?.threads.forEach((t) => t.correspondent?.partner.name);
+    }
+    render();
+    suggestions.delete();
+    expect(suggestions.exists()).toBe(false);
+});
+
+test("Record exists is reactive", async () => {
+    (class Thread extends Record {
+        static id = "name";
+        name;
+    }).register(localRegistry);
+    const store = await start();
+    const thread = store.Thread.insert("General");
+    effect(
+        (rec) => {
+            if (rec.exists()) {
+                expect.step("thread exists");
+            } else {
+                expect.step("thread does not exist");
+            }
+        },
+        [thread]
+    );
+    await expect.waitForSteps(["thread exists"]);
+    thread.delete();
+    await expect.waitForSteps(["thread does not exist"]);
+});
+
+test("record.delete() while used in a 'on-sort' sorted field should properly delete this record from relation", async () => {
+    // 'on-sort' flag marks the lazy relational field to sort-on-the-fly when 'in-need', i.e. when next accessed.
+    // When a record is deleted, internal code also deletes the records from relational fields.
+    // Internal code should make sure to avoid re-triggering a sort-on-the-fly while deleting the record from relation.
+    // For example, finding index of record and splice / internal slice should mistakenly delete the wrong records!
+    // Let's say relational fields is [1, 2, 3], 'sort-on-need' to become [3, 1, 2]
+    // We wouldn't want 2 step deletion of 3 as:
+    // - index: 2
+    // - internal array.slice() => sort-on-the-fly to [3, 1, 2]
+    // - delete record at index 2 => resulting list is [3, 1] instead of [1, 2]!
+    (class Message extends Record {
+        static id = "id";
+        id;
+        sequence;
+        thread_name;
+    }).register(localRegistry);
+    (class Thread extends Record {
+        static id = "name";
+        name;
+        description;
+        messages = Record.many("Message", {
+            // intentional combine of `compute` and `sort` so that the `compute` sets the `on-sort` flag
+            compute() {
+                return Object.values(this.store.Message.records).filter(
+                    (msg) => msg.thread_name === this.name
+                );
+            },
+            sort: (m1, m2) => (m1.sequence ?? 0) - (m2.sequence ?? 0),
+        });
+    }).register(localRegistry);
+    const store = await start();
+    const thread = store.Thread.insert("General");
+    store.Message.insert([
+        { id: 1, sequence: 10, thread_name: "General" },
+        { id: 2, sequence: 20, thread_name: "General" },
+    ]);
+    void thread.messages; // intentional read to have computed and sorted list
+    expect(toRaw(thread)._raw.messages.data).toEqual(["Message,1", "Message,2"]);
+    store.Thread.insert({ name: "General", description: "This is the general channel" });
+    store.Message.insert({ id: 3, sequence: 30, thread_name: "General" });
+    expect(toRaw(thread)._raw.messages.data).toEqual(["Message,1", "Message,2", "Message,3"]);
+    store.Message.get(3).sequence = 5; // intentional sequence change to trigger sort again, as the 'in-need' flag persists at least once
+    expect(toRaw(thread)._raw.messages.data).toEqual(["Message,3", "Message,1", "Message,2"]);
+    store.Message.get(3).sequence = 15;
+    expect(toRaw(thread)._raw.messages.data).toEqual(["Message,3", "Message,1", "Message,2"]); // still hasn't re-sorted yet
+    store.Message.get(3).delete();
+    expect(toRaw(thread)._raw.messages.data).toEqual(["Message,1", "Message,2"]);
 });

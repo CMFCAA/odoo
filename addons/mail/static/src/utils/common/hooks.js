@@ -9,6 +9,7 @@ import {
 } from "@odoo/owl";
 
 import { browser } from "@web/core/browser/browser";
+import { _t } from "@web/core/l10n/translation";
 import { Deferred } from "@web/core/utils/concurrency";
 import { makeDraggableHook } from "@web/core/utils/draggable_hook_builder_owl";
 import { useService } from "@web/core/utils/hooks";
@@ -256,6 +257,7 @@ export function useVisible(refName, cb, { ready = true } = {}) {
 
 export function useMessageHighlight(duration = 2000) {
     let timeout;
+    const notification = useState(useService("notification"));
     const state = useState({
         clearHighlight() {
             if (this.highlightedMessageId) {
@@ -269,10 +271,14 @@ export function useMessageHighlight(duration = 2000) {
          * @param {import("models").Thread} thread
          */
         async highlightMessage(message, thread) {
-            if (thread.notEq(message.thread)) {
+            if (thread.model !== "mail.box" && thread.notEq(message.thread)) {
                 return;
             }
             await thread.loadAround(message.id);
+            if (message.isEmpty) {
+                notification.add(_t("The message has been deleted."));
+                return;
+            }
             const lastHighlightedMessageId = state.highlightedMessageId;
             this.clearHighlight();
             if (lastHighlightedMessageId === message.id) {
@@ -295,10 +301,16 @@ export function useMessageHighlight(duration = 2000) {
             const scrollPromise = new Deferred();
             state.scrollPromise = scrollPromise;
             if ("onscrollend" in window) {
-                document.addEventListener("scrollend", scrollPromise.resolve, {
-                    capture: true,
-                    once: true,
-                });
+                const { top } = el.getBoundingClientRect();
+                const onScrollEnd = () => {
+                    if (el.getBoundingClientRect().top !== top) {
+                        scrollPromise.resolve();
+                    }
+                };
+                document.addEventListener("scrollend", onScrollEnd, { capture: true });
+                scrollPromise.then(() =>
+                    document.removeEventListener("scrollend", onScrollEnd, { capture: true })
+                );
             } else {
                 // To remove when safari will support the "scrollend" event.
                 setTimeout(scrollPromise.resolve, 250);

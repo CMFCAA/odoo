@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -106,7 +107,7 @@ def _initialize_db(id, db_name, demo, lang, user_password, login='admin', countr
 
 
 def _check_faketime_mode(db_name):
-    if os.getenv('ODOO_FAKETIME_TEST_MODE') and db_name != 'postgres':
+    if os.getenv('ODOO_FAKETIME_TEST_MODE') and db_name in odoo.tools.config['db_name'].split(','):
         try:
             db = odoo.sql_db.db_connect(db_name)
             with db.cursor() as cursor:
@@ -199,13 +200,16 @@ def exp_duplicate_database(db_original_name, db_name, neutralize_database=False)
             database_identifier(cr, db_original_name),
         ))
 
+    if neutralize_database:
+        # Neutralize the database before it becomes visible to the cron workers
+        with odoo.sql_db.db_connect(db_name).cursor() as cr:
+            odoo.modules.neutralize.neutralize_database(cr)
+
     registry = odoo.modules.registry.Registry.new(db_name)
     with registry.cursor() as cr:
         # if it's a copy of a database, force generation of a new dbuuid
         env = odoo.api.Environment(cr, SUPERUSER_ID, {})
         env['ir.config_parameter'].init(force=True)
-        if neutralize_database:
-            odoo.modules.neutralize.neutralize_database(cr)
 
     from_fs = odoo.tools.config.filestore(db_original_name)
     to_fs = odoo.tools.config.filestore(db_name)
@@ -352,7 +356,11 @@ def restore_db(db, dump_file, copy=False, neutralize_database=False):
                     filestore_path = os.path.join(dump_dir, 'filestore')
 
             pg_cmd = 'psql'
-            pg_args = ['-q', '-f', os.path.join(dump_dir, 'dump.sql')]
+            pg_args = [
+                '-q',
+                '-c', f'\\restrict {secrets.token_hex()}',
+                '-f', os.path.join(dump_dir, 'dump.sql'),
+            ]
 
         else:
             # <= 7.0 format (raw pg_dump output)
@@ -368,14 +376,17 @@ def restore_db(db, dump_file, copy=False, neutralize_database=False):
         if r.returncode != 0:
             raise Exception("Couldn't restore database")
 
+        if neutralize_database:
+            # Neutralize the database before it becomes visible to the cron workers
+            with odoo.sql_db.db_connect(db).cursor() as cr:
+                odoo.modules.neutralize.neutralize_database(cr)
+
         registry = odoo.modules.registry.Registry.new(db)
         with registry.cursor() as cr:
             env = odoo.api.Environment(cr, SUPERUSER_ID, {})
             if copy:
                 # if it's a copy of a database, force generation of a new dbuuid
                 env['ir.config_parameter'].init(force=True)
-            if neutralize_database:
-                odoo.modules.neutralize.neutralize_database(cr)
 
             if filestore_path:
                 filestore_dest = env['ir.attachment']._filestore()

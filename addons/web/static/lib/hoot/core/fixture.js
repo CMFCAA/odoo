@@ -1,12 +1,8 @@
 /** @odoo-module */
 
 import { App } from "@odoo/owl";
-import {
-    defineRootNode,
-    getActiveElement,
-    getCurrentDimensions,
-} from "@web/../lib/hoot-dom/helpers/dom";
-import { setupEventActions } from "@web/../lib/hoot-dom/helpers/events";
+import { _getCurrentDimensions, getActiveElement } from "@web/../lib/hoot-dom/helpers/dom";
+import { _setupEventActions } from "@web/../lib/hoot-dom/helpers/events";
 import { isInstanceOf } from "@web/../lib/hoot-dom/hoot_dom_utils";
 import { HootError } from "../hoot_utils";
 import { subscribeToTransitionChange } from "../mock/animation";
@@ -28,7 +24,8 @@ import { getViewPortHeight, getViewPortWidth } from "../mock/window";
 // Global
 //-----------------------------------------------------------------------------
 
-const { customElements, document, getSelection, HTMLElement, Promise, WeakSet } = globalThis;
+const { customElements, document, getSelection, HTMLElement, MutationObserver, Promise, WeakSet } =
+    globalThis;
 
 //-----------------------------------------------------------------------------
 // Internal
@@ -79,7 +76,7 @@ export function makeFixtureManager(runner) {
 
     function getFixture() {
         if (!allowFixture) {
-            throw new HootError(`Cannot access fixture outside of a test.`);
+            throw new HootError(`cannot access fixture outside of a test.`);
         }
         if (!currentFixture) {
             // Prepare fixture once to not force layouts/reflows
@@ -88,7 +85,7 @@ export function makeFixtureManager(runner) {
                 currentFixture.show();
             }
 
-            const { width, height } = getCurrentDimensions();
+            const { width, height } = _getCurrentDimensions();
             if (width !== getViewPortWidth()) {
                 currentFixture.style.width = `${width}px`;
             }
@@ -99,15 +96,6 @@ export function makeFixtureManager(runner) {
             document.body.appendChild(currentFixture);
         }
         return currentFixture;
-    }
-
-    function globalCleanup() {
-        HootFixtureElement.styleElement.remove();
-    }
-
-    function globalSetup() {
-        defineRootNode(getFixture);
-        document.head.appendChild(HootFixtureElement.styleElement);
     }
 
     function setup() {
@@ -124,8 +112,6 @@ export function makeFixtureManager(runner) {
 
     return {
         cleanup,
-        globalCleanup,
-        globalSetup,
         setup,
         get: getFixture,
     };
@@ -142,6 +128,8 @@ export class HootFixtureElement extends HTMLElement {
 
     static {
         customElements.define(this.TAG_NAME, this);
+
+        this.styleElement.id = "hoot-fixture-style";
         this.styleElement.textContent = /* css */ `
             ${this.TAG_NAME} {
                 position: fixed !important;
@@ -181,7 +169,7 @@ export class HootFixtureElement extends HTMLElement {
     _iframes = new Map();
 
     connectedCallback() {
-        setupEventActions(this);
+        _setupEventActions(this);
         subscribeToTransitionChange((allowTransitions) =>
             this.classList.toggle(this.constructor.CLASSES.transitions, allowTransitions)
         );
@@ -217,7 +205,7 @@ export class HootFixtureElement extends HTMLElement {
                 continue;
             }
             this._iframes.set(iframe, waitForIframe(iframe));
-            setupEventActions(iframe.contentWindow);
+            _setupEventActions(iframe.contentWindow);
         }
         for (const iframe of toRemove) {
             this._iframes.delete(iframe);

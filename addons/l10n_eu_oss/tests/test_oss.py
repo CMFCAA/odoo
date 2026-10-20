@@ -102,7 +102,7 @@ class TestOSSSpain(AccountTestInvoicingCommon):
         tax_oss = self.env['account.tax'].search([('name', 'ilike', f'%"{another_eu_country_code}"%')], limit=1)
 
         for doc_type, tag_xml_id in (
-                ("invoice", "l10n_es.mod_303_casilla_124_balance"),
+                ("invoice", "l10n_es.mod_303_casilla_123_balance"),
         ):
             with self.subTest(doc_type=doc_type, report_line_xml_id=tag_xml_id):
                 oss_tag_id = tax_oss[f"{doc_type}_repartition_line_ids"]\
@@ -114,6 +114,18 @@ class TestOSSSpain(AccountTestInvoicingCommon):
                     .filtered(lambda t: not t.tax_negate)
 
                 self.assertIn(expected_tag_id, oss_tag_id, f"{doc_type} tag from Spanish CoA not correctly linked")
+
+    def test_l10n_es_type_oss_tax(self):
+        """
+        Test that the foreign oss taxes generate with l10n_es_type as no_sujeto_loc
+        """
+        if self.env['ir.module.module']._get('l10n_es').state != 'installed':
+            self.skipTest(reason="L10n_es is required for this test.")
+
+        another_eu_country_code = (self.env.ref('base.europe').country_ids - self.company_data['company'].country_id)[0].code
+        tax_oss = self.env['account.tax'].search([('name', 'ilike', f'%"{another_eu_country_code}"%')], limit=1)
+
+        self.assertEqual(tax_oss.l10n_es_type, 'no_sujeto_loc')
 
 
 @tagged('post_install', 'post_install_l10n', '-at_install')

@@ -294,6 +294,35 @@ class TestChannelInternals(MailCommon, HttpCase):
                 message_type='comment', subtype_xmlid='mail.mt_comment')
         self.assertSentEmail(self.test_channel.env.user.partner_id, [self.test_partner])
 
+    @mute_logger('odoo.addons.mail.models.mail_mail', 'odoo.models.unlink')
+    def test_channel_recipients_user_of_partner_with_archived_user(self):
+        """The user picked for a recipient partner is one of its active users."""
+        archived_only, two_logins = self.env["res.partner"].with_context(self._test_context).create([
+            {"email": "archived.only@example.com", "name": "Archived Only"},
+            {"email": "two.logins@example.com", "name": "Two Logins"},
+        ])
+        groups_id = [Command.set([self.env.ref("base.group_user").id])]
+        old_alone, old_login, new_login = (
+            self.env["res.users"].with_context(self._test_context).create([
+                {"groups_id": groups_id, "login": "old_alone", "partner_id": archived_only.id},
+                {"groups_id": groups_id, "login": "old_login", "partner_id": two_logins.id},
+                {"groups_id": groups_id, "login": "new_login", "partner_id": two_logins.id},
+            ])
+        )
+        (old_alone | old_login).active = False
+        recipients = self.test_channel._notify_get_recipients(
+            self.env["mail.message"],
+            {
+                "author_id": self.partner_employee.id,
+                "message_type": "comment",
+                "partner_ids": (archived_only | two_logins).ids,
+            },
+        )
+        self.assertEqual(
+            {r["id"]: r["uid"] for r in recipients if r["notif"] != "web_push"},
+            {archived_only.id: None, two_logins.id: new_login.id},
+        )
+
     @mute_logger('odoo.models.unlink')
     def test_channel_user_synchronize(self):
         """Archiving / deleting a user should automatically unsubscribe related partner from group restricted channels"""
@@ -311,6 +340,31 @@ class TestChannelInternals(MailCommon, HttpCase):
         self.user_employee_nomail.unlink()
         self.assertEqual(group_restricted_channel.channel_partner_ids, self.env['res.partner'])
         self.assertEqual(self.test_channel.channel_partner_ids, self.user_employee.partner_id | self.partner_employee_nomail)
+
+    @mute_logger("odoo.models.unlink")
+    def test_channel_user_synchronize_partner_with_several_users(self):
+        """A partner stays in a group restricted channel as long as one of its users has access"""
+        group_restricted_channel = self.env["discuss.channel"].channel_create(
+            name="Sic Mundus",
+            group_id=self.env.ref("base.group_user").id,
+        )
+        second_user = (
+            self.env["res.users"]
+            .with_context(self._test_context)
+            .create(
+                {
+                    "groups_id": [Command.set([self.env.ref("base.group_user").id])],
+                    "login": "employee_second_login",
+                    "partner_id": self.partner_employee.id,
+                },
+            )
+        )
+        group_restricted_channel.add_members(self.partner_employee.ids)
+        self.assertIn(self.partner_employee, group_restricted_channel.channel_partner_ids)
+        self.user_employee.active = False
+        self.assertIn(self.partner_employee, group_restricted_channel.channel_partner_ids)
+        second_user.active = False
+        self.assertNotIn(self.partner_employee, group_restricted_channel.channel_partner_ids)
 
     @users('employee_nomail')
     def test_channel_info_get(self):
@@ -403,68 +457,78 @@ class TestChannelInternals(MailCommon, HttpCase):
         )
 
     @users('employee')
-    def test_set_last_seen_message_should_send_notification_only_once(self):
+    def test_set_last_seen_message_should_always_send_notification(self):
         chat = self.env['discuss.channel'].with_user(self.user_admin).channel_get((self.partner_employee | self.user_admin.partner_id).ids)
+        # avoid testing behavior when member has no seen_message_id
+        read_message = self._add_messages(chat, "Read message", author=self.user_employee.partner_id)
         msg_1 = self._add_messages(chat, 'Body1', author=self.user_employee.partner_id)
         member = chat.channel_member_ids.filtered(lambda m: m.partner_id == self.user_admin.partner_id)
+        member.seen_message_id = read_message
         self._reset_bus()
+
+        mark_as_read_notifs = [
+            {
+                "type": "mail.record/insert",
+                "payload": {
+                    "discuss.channel.member": [
+                        {
+                            "id": member.id,
+                            "message_unread_counter": 0,
+                            "message_unread_counter_bus_id": 0,
+                            "new_message_separator": msg_1.id + 1,
+                            "persona": {"id": self.user_admin.partner_id.id, "type": "partner"},
+                            "syncUnread": False,
+                            "thread": {
+                                "id": chat.id,
+                                "model": "discuss.channel",
+                            },
+                        },
+                    ],
+                    "res.partner": self._filter_partners_fields(
+                        {
+                            "id": self.user_admin.partner_id.id,
+                            "name": self.user_admin.partner_id.name,
+                        },
+                    ),
+                },
+            },
+            {
+                "type": "mail.record/insert",
+                "payload": {
+                    "discuss.channel.member": [
+                        {
+                            "id": member.id,
+                            "persona": {"id": self.user_admin.partner_id.id, "type": "partner"},
+                            "seen_message_id": msg_1.id,
+                            "thread": {"id": chat.id, "model": "discuss.channel"},
+                        },
+                    ],
+                    "res.partner": self._filter_partners_fields(
+                        {
+                            "id": self.user_admin.partner_id.id,
+                            "name": self.user_admin.partner_id.name,
+                        },
+                    ),
+                },
+            },
+        ]
+
         with self.assertBus(
             [
                 (self.env.cr.dbname, "discuss.channel", chat.id),
                 (self.env.cr.dbname, "res.partner", self.user_admin.partner_id.id),
             ],
-            [
-                {
-                    "type": "mail.record/insert",
-                    "payload": {
-                        "discuss.channel.member": [
-                            {
-                                "id": member.id,
-                                "message_unread_counter": 0,
-                                "message_unread_counter_bus_id": 0,
-                                "new_message_separator": msg_1.id + 1,
-                                "persona": {"id": self.user_admin.partner_id.id, "type": "partner"},
-                                "syncUnread": False,
-                                "thread": {
-                                    "id": chat.id,
-                                    "model": "discuss.channel",
-                                },
-                            },
-                        ],
-                        "res.partner": self._filter_partners_fields(
-                            {
-                                "id": self.user_admin.partner_id.id,
-                                "name": self.user_admin.partner_id.name,
-                            },
-                        ),
-                    },
-                },
-                {
-                    "type": "mail.record/insert",
-                    "payload": {
-                        "discuss.channel.member": [
-                            {
-                                "id": member.id,
-                                "persona": {"id": self.user_admin.partner_id.id, "type": "partner"},
-                                "seen_message_id": msg_1.id,
-                                "thread": {"id": chat.id, "model": "discuss.channel"},
-                            },
-                        ],
-                        "res.partner": self._filter_partners_fields(
-                            {
-                                "id": self.user_admin.partner_id.id,
-                                "name": self.user_admin.partner_id.name,
-                            },
-                        ),
-                    },
-                },
-            ],
+            mark_as_read_notifs,
         ):
             member._mark_as_read(msg_1.id)
-        # There should be no channel member to be set as seen in the second time
-        # So no notification should be sent
         self._reset_bus()
-        with self.assertBus([], []):
+        with self.assertBus(
+            [
+                (self.env.cr.dbname, "res.partner", self.user_admin.partner_id.id),
+                (self.env.cr.dbname, "res.partner", self.user_admin.partner_id.id),
+            ],
+            mark_as_read_notifs
+        ):
             member._mark_as_read(msg_1.id)
 
     def test_channel_message_post_should_not_allow_adding_wrong_parent(self):
@@ -871,3 +935,15 @@ class TestChannelInternals(MailCommon, HttpCase):
             ],
         ):
             test_group.execute_command_help()
+
+    def test_create_channel_with_partners_and_guests(self):
+        channel = self.env['discuss.channel'].create({
+            'name': 'test channel',
+            'channel_member_ids': [
+                (0, 0, {'guest_id': self.guest.id}),
+                (0, 0, {'partner_id': self.partner_employee.id})
+            ]
+        })
+        actual_member_ids = [m.partner_id.id if m.partner_id else m.guest_id.id for m in channel.channel_member_ids]
+        expected_member_ids = [self.partner_employee.id, self.guest.id, self.env.user.partner_id.id]
+        self.assertCountEqual(actual_member_ids, expected_member_ids)

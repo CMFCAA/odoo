@@ -1258,6 +1258,18 @@ export const formatSelection = (editor, formatName, {applyStyle, formatProps} = 
     const selection = editor.document.getSelection();
     let direction
     let wasCollapsed;
+    if (
+        closestElement(
+            selection.anchorNode,
+            '[data-oe-model]:not([data-oe-type="html"]):not([data-oe-field="arch"]):not([data-oe-translation-source-sha])'
+        ) ||
+        closestElement(
+            selection.focusNode,
+            '[data-oe-model]:not([data-oe-type="html"]):not([data-oe-field="arch"]):not([data-oe-translation-source-sha])'
+        )
+    ) {
+        return;
+    }
     if (editor.editable.querySelector('.o_selected_td')) {
         direction = DIRECTIONS.RIGHT;
     } else {
@@ -2214,7 +2226,7 @@ export function isEmptyBlock(blockEl) {
     for (const node of nodes) {
         // There is no text and no double BR, the only thing that could make
         // this visible is a "visible empty" node like an image.
-        if (node.nodeName != 'BR' && (isSelfClosingElement(node) || isIconElement(node))) {
+        if (node.nodeName != 'BR' && (isSelfClosingElement(node) || isIconElement(node) || isZWS(node))) {
             return false;
         }
     }
@@ -2492,6 +2504,15 @@ export function fillEmpty(el) {
         el.appendChild(zws);
         el.setAttribute("data-oe-zws-empty-inline", "");
         fillers.zws = zws;
+        // If the parent was filled with BR and we are filling the `el` here
+        // we should remove the parent `br` otherwise we fill the el twice.
+        // we do that only for visible el as in `cleanForSave` we remove the 
+        // non visible elements (with no classes if they are empty) so we should
+        // keep the br
+        if (el.classList.length && fillers.br) {
+            fillers.br.remove();
+            delete fillers.br;
+        }
         const previousSibling = el.previousSibling;
         if (previousSibling && previousSibling.nodeName === "BR") {
             previousSibling.remove();
@@ -2863,8 +2884,15 @@ const priorityRestoreStateRules = [
     [
         // Replace a space by &nbsp; when it was visible thanks to a BR which
         // is now gone.
-        { direction: DIRECTIONS.RIGHT, cType1: CTGROUPS.BR, cType2: CTYPES.SPACE | CTGROUPS.BLOCK },
+        { direction: DIRECTIONS.RIGHT, cType1: CTGROUPS.BR, cType2: CTYPES.SPACE },
         { spaceVisibility: true },
+    ],
+    [
+        // Replace a space by &nbsp; when it was visible thanks to a BR which
+        // is now gone and duplicate a BR which was visible thanks to a second
+        // BR which is now gone.
+        { direction: DIRECTIONS.RIGHT, cType1: CTGROUPS.BR, cType2: CTGROUPS.BLOCK },
+        { spaceVisibility: true, brVisibility: true },
     ],
     [
         // Remove all collapsed spaces when a space is removed.

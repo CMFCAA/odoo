@@ -1,11 +1,21 @@
 // ! WARNING: this module cannot depend on modules not ending with ".hoot" (except libs) !
 
-import { describe, dryRun, globals, start, stop } from "@odoo/hoot";
-import { Deferred } from "@odoo/hoot-dom";
-import { watchKeys, watchListeners } from "@odoo/hoot-mock";
+import {
+    Deferred,
+    delay,
+    describe,
+    dryRun,
+    globals,
+    start,
+    stop,
+    watchAddedNodes,
+    watchKeys,
+    watchListeners,
+} from "@odoo/hoot";
 
 import { mockBrowserFactory } from "./mock_browser.hoot";
 import { mockCurrencyFactory } from "./mock_currency.hoot";
+import { mockFunctionsFactory } from "./mock_functions.hoot";
 import { mockSessionFactory } from "./mock_session.hoot";
 import { makeTemplateFactory } from "./mock_templates.hoot";
 import { mockUserFactory } from "./mock_user.hoot";
@@ -111,7 +121,7 @@ async function describeDrySuite(fileSuffix, entryPoints) {
         });
     }
 
-    moduleSetLoader.cleanup();
+    await moduleSetLoader.cleanup();
 }
 
 /**
@@ -135,18 +145,30 @@ async function fetchDependencies(addons) {
             });
         }
         dependencyBatch.push(...addonsToFetch);
-        dependencyBatchPromise.then((allDependencies) => {
-            for (const [moduleName, dependencyNames] of Object.entries(allDependencies)) {
-                dependencyCache[moduleName] ||= new Deferred();
-                dependencyCache[moduleName].resolve();
+        dependencyBatchPromise.then(
+            (allDependencies) => {
+                for (const [moduleName, dependencyNames] of Object.entries(allDependencies)) {
+                    dependencyCache[moduleName] ||= new Deferred();
+                    dependencyCache[moduleName].resolve();
 
-                dependencies[moduleName] = dependencyNames.filter(
-                    (dep) => !DEFAULT_ADDONS.includes(dep)
+                    dependencies[moduleName] = dependencyNames.filter(
+                        (dep) => !DEFAULT_ADDONS.includes(dep)
+                    );
+                }
+
+                resolveAddonDependencies(dependencies);
+            },
+            (error) => {
+                const reason = new Error(
+                    `could not fetch the dependencies of ${addonsToFetch.join(", ")}: ${
+                        error.message
+                    }`
                 );
+                for (const addon of addonsToFetch) {
+                    dependencyCache[addon].reject(reason);
+                }
             }
-
-            resolveAddonDependencies(dependencies);
-        });
+        );
     }
 
     await Promise.all([...addons].map((addon) => dependencyCache[addon]));
@@ -391,6 +413,7 @@ async function __gcAndLogMemory(label, testCount) {
 /** @extends {OdooModuleLoader} */
 class ModuleSetLoader extends loader.constructor {
     cleanups = [];
+    preventGlobalDefine = false;
 
     /**
      * @param {ModuleSet} moduleSet
@@ -424,7 +447,11 @@ class ModuleSetLoader extends loader.constructor {
         return !filter || filter(name) || R_DEFAULT_MODULE.test(name);
     }
 
-    cleanup() {
+    async cleanup() {
+        // Wait for side-effects to be properly caught up by the different "watchers"
+        // (like mutation records).
+        await delay();
+
         odoo.define = define;
         odoo.loader = loader;
 
@@ -438,7 +465,7 @@ class ModuleSetLoader extends loader.constructor {
      * @type {typeof loader["define"]}
      */
     define(name, deps, factory) {
-        if (!loader.factories.has(name)) {
+        if (!this.preventGlobalDefine && !loader.factories.has(name)) {
             // Lazy-loaded modules are added to the main loader for next ModuleSetLoader
             // instances.
             loader.define(name, deps, factory, true);
@@ -454,7 +481,8 @@ class ModuleSetLoader extends loader.constructor {
         this.cleanups.push(
             watchKeys(window.odoo),
             watchKeys(window, ALLOWED_GLOBAL_KEYS),
-            watchListeners()
+            watchListeners(window),
+            watchAddedNodes(window)
         );
 
         // Load module set modules (without entry point)
@@ -491,6 +519,7 @@ const ALLOWED_GLOBAL_KEYS = [
     "ace", // Ace editor
     // Bootstrap.js is voluntarily ignored as it is deprecated
     "Chart", // Chart.js
+    "DiffMatchPatch", // Diff Match Patch
     "DOMPurify", // DOMPurify
     "FullCalendar", // Full Calendar
     "L", // Leaflet
@@ -500,6 +529,7 @@ const ALLOWED_GLOBAL_KEYS = [
     "owl", // Owl
     "pdfjsLib", // PDF JS
     "Popper", // Popper
+    "Prism", // PrismJS
     "SignaturePad", // Signature Pad
     "StackTrace", // StackTrace
     "ZXing", // ZXing
@@ -525,6 +555,7 @@ const MODULE_MOCKS_BY_NAME = new Map([
     ["@web/core/currency", mockCurrencyFactory],
     ["@web/core/templates", makeTemplateFactory],
     ["@web/core/user", mockUserFactory],
+    ["@web/core/utils/functions", mockFunctionsFactory],
     ["@web/session", mockSessionFactory],
 ]);
 const MODULE_MOCKS_BY_REGEX = new Map([
@@ -697,15 +728,13 @@ export async function runTests(options) {
         // Run recently added tests
         const running = await start(suite);
 
-        moduleSetLoader.cleanup();
+        await moduleSetLoader.cleanup();
         await __gcAndLogMemory(suite.fullName, suite.reporting.tests);
 
         if (!running) {
             break;
         }
     }
-
-    await stop();
 
     // Perform final cleanups
     moduleNamesCache.clear();
@@ -720,4 +749,7 @@ export async function runTests(options) {
     }
 
     await __gcAndLogMemory("tests done");
+
+    // Report last, as the server kills the browser on the result report.
+    await stop();
 }

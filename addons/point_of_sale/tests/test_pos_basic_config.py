@@ -823,16 +823,17 @@ class TestPoSBasicConfig(TestPoSCommon):
         order_data = self.create_ui_order_data([(self.product3, 1)])
         amount_paid = order_data['amount_paid']
         with (
-            self.assertLogs('odoo.addons.point_of_sale.models.pos_order', level='DEBUG') as cm,
+            self.assertLogs('odoo.addons.point_of_sale.models.pos_order') as cm,
             unittest.mock.patch('odoo.addons.point_of_sale.models.pos_order.randrange', return_value=1996)
         ):
+            self.env['ir.config_parameter'].sudo().set_param('point_of_sale.log_order_data', 'True')
             res = self.env['pos.order'].sync_from_ui([order_data])
             # Basic check for logs on order synchronization
             order_log_str = self.env['pos.order']._get_order_log_representation(order_data)
             odoo_order_id = res['pos.order'][0]['id']
             self.assertEqual(len(cm.output), 4)
             self.assertEqual(cm.output[0], f"INFO:odoo.addons.point_of_sale.models.pos_order:PoS synchronisation #1996 started for PoS orders references: [{order_log_str}]")
-            self.assertTrue(cm.output[1].startswith(f'DEBUG:odoo.addons.point_of_sale.models.pos_order:PoS synchronisation #1996 processing order {order_log_str} order full data: '))
+            self.assertTrue(cm.output[1].startswith(f'INFO:odoo.addons.point_of_sale.models.pos_order:PoS synchronisation #1996 processing order {order_log_str} order full data:'))
             self.assertEqual(cm.output[2], f'INFO:odoo.addons.point_of_sale.models.pos_order:PoS synchronisation #1996 order {order_log_str} created pos.order #{odoo_order_id}')
             self.assertEqual(cm.output[3], 'INFO:odoo.addons.point_of_sale.models.pos_order:PoS synchronisation #1996 finished')
             
@@ -1122,6 +1123,31 @@ class TestPoSBasicConfig(TestPoSCommon):
         self.env['pos.order'].sync_from_ui([self.create_ui_order_data([(self.product3, 1)])])
         self.assertEqual(get_top_product_ids(3), [self.product3.id, self.product2.id, self.product1.id])
 
+    def test_ticket_screen_order_data_includes_products(self):
+        """The ticket screen payload must include the orderlines' products
+        and the order's partner."""
+        self.open_new_session(0)
+        self.env['pos.order'].sync_from_ui([
+            self.create_ui_order_data([(self.product1, 1), (self.product2, 1)], customer=self.customer),
+        ])
+        order = self.pos_session.order_ids
+        # Archived products must be sent too.
+        self.product2.action_archive()
+
+        data = order.get_ticket_screen_order_data()
+        line_product_ids = {line['product_id'] for line in data['pos.order.line']}
+        sent_product_ids = {product['id'] for product in data.get('product.product', [])}
+        self.assertEqual(line_product_ids, {self.product1.id, self.product2.id})
+        self.assertTrue(
+            line_product_ids <= sent_product_ids,
+            "The products of the orderlines must be sent with the ticket screen data",
+        )
+        sent_partner_ids = {partner['id'] for partner in data.get('res.partner', [])}
+        self.assertIn(
+            self.customer.id, sent_partner_ids,
+            "The partner of the order must be sent with the ticket screen data",
+        )
+
     def test_closing_entry_by_product(self):
         # set the Group by Product at Closing Entry
         self.config.is_closing_entry_by_product = True
@@ -1258,3 +1284,46 @@ class TestPoSBasicConfig(TestPoSCommon):
         self.assertEqual(order.picking_count, 1, 'Order should have one picking')
         self.assertEqual(len(order.payment_ids), 1, 'Order should have one payment')
         self.assertEqual(self.env['account.move'].search_count([('ref', '=', order.name)]), 1, 'Order should have one invoice')
+
+    def test_refunded_order_id(self):
+        """
+        An order containing refunded lines from two different orders is no longer allowed,
+        but some legacy records of this kind may still exist.
+        This test ensures that the refunded_order_id is correctly computed in such cases.
+        """
+        current_session = self.open_new_session()
+        orders = list(self._create_orders([
+            {'pos_order_lines_ui_args': [(self.product1, 1)]},
+            {'pos_order_lines_ui_args': [(self.product2, 1)]}
+        ]).values())
+
+        refund_order = self.env['pos.order'].create({
+            'company_id': self.env.company.id,
+            'session_id': current_session.id,
+            'lines': [
+                (0, 0, {
+                    'product_id': self.product1.id,
+                    'price_unit': -10,
+                    'qty': 1,
+                    'tax_ids': [[6, False, []]],
+                    'price_subtotal': -10,
+                    'price_subtotal_incl': -10,
+                    'refunded_orderline_id': orders[0].lines[0].id
+                }),
+                (0, 0, {
+                    'product_id': self.product2.id,
+                    'price_unit': -10,
+                    'qty': 1,
+                    'tax_ids': [[6, False, []]],
+                    'price_subtotal': -10,
+                    'price_subtotal_incl': -10,
+                    'refunded_orderline_id': orders[1].lines[0].id
+                })
+            ],
+            'amount_paid': -10,
+            'amount_total': -10,
+            'amount_tax': 0.0,
+            'amount_return': 0.0,
+        })
+
+        self.assertEqual(refund_order.refunded_order_id, orders[0])

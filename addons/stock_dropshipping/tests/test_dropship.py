@@ -4,10 +4,13 @@
 from odoo import Command
 
 from odoo.tests import common, tagged, Form
+from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 from odoo.tools import mute_logger
+from datetime import datetime
 
 
-class TestDropship(common.TransactionCase):
+@tagged('post_install', '-at_install')
+class TestDropship(AccountTestInvoicingCommon):
 
     @classmethod
     def setUpClass(cls):
@@ -431,6 +434,81 @@ class TestDropship(common.TransactionCase):
             self.env.ref('stock.stock_location_customers')
         )
 
+    def test_dropship_return_backorders_bill_on_order(self):
+        """
+        Dropshipped billed-on-order product
+        Sell 10
+        Deliver 7 + backorder creation
+        Return 2
+        Process the backorder (3)
+        Re-return 2
+        Ensure all SVL values are correct
+        """
+        product = self.dropship_product
+        product.purchase_method = 'purchase'
+        product.write({
+            'seller_ids': [
+                Command.clear(),
+                Command.create({
+                    'partner_id': self.supplier.id,
+                    'min_qty': 1.0,
+                    'price': 10
+                }),
+            ],
+            'standard_price': 10,
+        })
+        product.categ_id.property_cost_method = 'average'
+        product.route_ids = self.dropshipping_route
+        sale_order = self.env['sale.order'].create({
+            'partner_id': self.customer.id,
+            'order_line': [Command.create({
+                'product_id': product.id,
+                'product_uom_qty': 10.0,
+                'price_unit': 10,
+            })]
+        })
+        sale_order.action_confirm()
+        purchase_order = sale_order.order_line.purchase_line_ids.order_id
+        purchase_order.button_confirm()
+
+        purchase_order.action_create_invoice()
+        purchase_bill = purchase_order.invoice_ids
+        purchase_bill.invoice_date = datetime.today()
+        purchase_bill.action_post()
+
+        dropship = sale_order.picking_ids
+        dropship.move_ids.quantity = 7
+        res_dict = dropship.button_validate()
+        backorder_wizard = Form(self.env['stock.backorder.confirmation'].with_context(res_dict['context'])).save()
+        backorder_wizard.process()
+        backorder = dropship.backorder_ids
+
+        return_form = Form(self.env['stock.return.picking'].with_context(active_id=dropship.id, active_model='stock.picking'))
+        return_wizard = return_form.save()
+        return_wizard.product_return_moves.quantity = 2
+        action = return_wizard.action_create_returns()
+        return_picking = self.env['stock.picking'].browse(action['res_id'])
+        return_picking.move_ids.quantity = 2
+        return_picking.button_validate()
+
+        backorder.button_validate()
+
+        return_form = Form(self.env['stock.return.picking'].with_context(active_id=return_picking.id, active_model='stock.picking'))
+        return_wizard = return_form.save()
+        return_wizard.product_return_moves.quantity = 2
+        action = return_wizard.action_create_returns()
+        re_return = self.env['stock.picking'].browse(action['res_id'])
+        re_return.move_ids.quantity = 2
+        re_return.button_validate()
+
+        layers = sale_order.picking_ids.move_ids.stock_valuation_layer_ids.sorted('id')
+        self.assertEqual(layers.mapped('value'), [
+            70.0, -70.0,    # Dropship
+            20.0, -20.0,    # Return
+            30.0, -30.0,    # Backorder
+            20.0, -20.0,    # Re-return
+        ])
+
 
 @tagged('post_install', '-at_install')
 class TestDropshipPostInstall(common.TransactionCase):
@@ -509,3 +587,58 @@ class TestDropshipPostInstall(common.TransactionCase):
         return_picking.button_validate()
         self.assertEqual(sale_order.order_line.qty_delivered, 0)
         self.assertEqual(purchase_order.order_line.qty_received, 0)
+
+    def test_so_cancel_creates_one_activity_on_po(self):
+        """
+        Create Sale order with dropshipping product, confirm it, confirm the generated
+        purchase order, then cancel the sale order. This should create an activity on the
+        purchase order.
+        """
+        sale_order = self.env['sale.order'].create({
+            'partner_id': self.customer.id,
+            'order_line': [Command.create({
+                'product_id': self.dropship_product.id,
+            })],
+        })
+        sale_order.action_confirm()
+        purchase_order = self.env['purchase.order'].search([
+            ('origin', '=', sale_order.name)
+        ], limit=1)
+        purchase_order.button_confirm()
+        sale_order._action_cancel()
+        self.assertEqual(len(purchase_order.activity_ids), 1)
+
+    def test_merged_dropship_po_links_all_sale_orders(self):
+        """When dropship POs from different SOs are merged and confirmed,
+        each SO must get its own picking so delivery status is updated on validation."""
+        product_b = self.env['product.product'].create({
+            'name': 'Dropshipped Product B',
+            'standard_price': 20,
+            'seller_ids': [Command.create({'partner_id': self.supplier.id})],
+            'route_ids': [Command.link(self.env.ref('stock_dropshipping.route_drop_shipping').id)],
+        })
+        so1, so2 = self.env['sale.order'].create([{
+            'partner_id': self.customer.id,
+            'order_line': [Command.create({'product_id': self.dropship_product.id, 'product_uom_qty': 1})],
+        }, {
+            'partner_id': self.customer.id,
+            'order_line': [Command.create({'product_id': product_b.id, 'product_uom_qty': 1})],
+        }])
+        all_sos = so1 | so2
+        all_sos.action_confirm()
+
+        pos = self.env['purchase.order'].search([('group_id', 'in', all_sos.procurement_group_id.ids)])
+        pos.action_merge()
+        merged_pos = pos.filtered(lambda p: p.state != 'cancel')
+        merged_pos.button_confirm()
+
+        pickings = merged_pos.picking_ids.filtered('is_dropship')
+        self.assertEqual(len(pickings), 2)
+        self.assertEqual(pickings.mapped('group_id'), (so1 | so2).procurement_group_id)
+        self.assertEqual(pickings.mapped('sale_id'), so1 | so2)
+        for picking in pickings:
+            picking.move_ids.write({'quantity': 1, 'picked': True})
+            picking.button_validate()
+
+        for so in [so1, so2]:
+            self.assertEqual(so.delivery_status, 'full')

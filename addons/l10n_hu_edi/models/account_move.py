@@ -124,10 +124,6 @@ class AccountMove(models.Model):
                 raise ValidationError(_('Cannot reset to draft or cancel invoice %s because an electronic document was already sent to NAV!', move.name))
 
     # === Computes === #
-    @api.depends('delivery_date')
-    def _compute_invoice_currency_rate(self):
-        # In Hungary, the currency rate should be based on the delivery date.
-        super()._compute_invoice_currency_rate()
 
     @api.depends('delivery_date')
     def _compute_expected_currency_rate(self):
@@ -138,6 +134,12 @@ class AccountMove(models.Model):
         if self.country_code == 'HU' and self.delivery_date:
             return self.delivery_date
         return super()._get_invoice_currency_rate_date()
+
+    def _get_default_currency_rate_date(self):
+        self.ensure_one()
+        if self.country_code == 'HU' and self.delivery_date:
+            return self.delivery_date
+        return super()._get_default_currency_rate_date()
 
     @api.depends('l10n_hu_edi_messages')
     def _compute_message_html(self):
@@ -157,10 +159,16 @@ class AccountMove(models.Model):
         # EXTEND 'account' to add dependencies
         return super()._compute_need_cancel_request()
 
-    @api.depends('name')
+    @api.depends('name', 'ref')
     def _compute_l10n_hu_edi_attachment_filename(self):
         for move in self:
-            move.l10n_hu_edi_attachment_filename = f'{move.name.replace("/", "_")}.xml' if move.name else 'nav30.xml'
+            move.l10n_hu_edi_attachment_filename = f'{(move.ref or move.name or "nav30").replace("/", "_")}.xml'
+
+    # === Inverses === #
+
+    def _inverse_delivery_date(self):
+        super()._inverse_delivery_date()
+        self._conditional_add_to_compute('invoice_currency_rate', lambda m: m.country_code == 'HU')
 
     # === Overrides === #
 
@@ -274,19 +282,18 @@ class AccountMove(models.Model):
         return chain_invoices
 
     def _l10n_hu_get_currency_rate(self):
-        """ Get the invoice currency / HUF rate.
-
-            We don't use `invoice_currency_rate` to avoid rounding error as 1/0.002470 ≃ 404.87,
-            and we want exactly 404.87, i.e. the rate given by the MNB of Hungary, to avoid NAV error
-            upon XML submission.
-        """
+        """ Get the invoice currency / HUF rate. """
         self.ensure_one()
-        return self.env['res.currency']._get_conversion_rate(
-            from_currency=self.currency_id,
-            to_currency=self.env.ref('base.HUF'),
-            company=self.company_id,
-            date=self.invoice_date,
-        )
+
+        if self.company_currency_id == self.env.ref('base.HUF'):
+            return 1 / self.invoice_currency_rate
+        else:
+            return self.env['res.currency']._get_conversion_rate(
+                from_currency=self.currency_id,
+                to_currency=self.env.ref('base.HUF'),
+                company=self.company_id,
+                date=self._get_invoice_currency_rate_date(),
+            )
 
     def _l10n_hu_edi_set_chain_index(self):
         """ Set the l10n_hu_invoice_chain_index field. """
@@ -497,6 +504,18 @@ class AccountMove(models.Model):
             for batch in split_every(100, batch_company):
                 self.env['account.move'].union(*batch)._l10n_hu_edi_upload_single_batch(connection)
 
+    def _l10n_hu_edi_get_operation_type(self):
+        base_invoice = self._l10n_hu_get_chain_base()
+        modification_invoices = self._l10n_hu_get_chain_invoices() - base_invoice
+
+        all_invoices_residual_zero = all(invoice.amount_residual == 0 for invoice in modification_invoices)
+
+        if self == base_invoice:
+            return 'CREATE'
+        if base_invoice.amount_residual == 0 and all_invoices_residual_zero:
+            return 'STORNO'
+        return 'MODIFY'
+
     def _l10n_hu_edi_upload_single_batch(self, connection):
         try:
             token_result = connection.do_token_exchange(self.company_id.sudo()._l10n_hu_edi_get_credentials_dict())
@@ -514,19 +533,10 @@ class AccountMove(models.Model):
         for i, invoice in enumerate(self, start=1):
             invoice.l10n_hu_edi_batch_upload_index = i
 
-        def get_operation_type(invoice):
-            operation_type = 'MODIFY'
-            base_invoice = invoice._l10n_hu_get_chain_base()
-            if invoice == base_invoice:
-                operation_type = 'CREATE'
-            elif base_invoice.amount_residual == 0:
-                operation_type = 'STORNO'
-            return operation_type
-
         invoice_operations = [
             {
                 'index': invoice.l10n_hu_edi_batch_upload_index,
-                'operation': get_operation_type(invoice),
+                'operation': invoice._l10n_hu_edi_get_operation_type(),
                 'invoice_data': base64.b64decode(invoice.l10n_hu_edi_attachment),
             }
             for invoice in self
@@ -907,16 +917,17 @@ class AccountMove(models.Model):
                     last_reconciled_payment = reconciled_moves.filtered(lambda m: m.origin_payment_id or m.statement_line_id).sorted('date', reverse=True)[:1]
 
                     if last_reconciled_payment:
+                        paid_advance_invoice = advance_invoices.filtered(lambda m: last_reconciled_payment in m._get_reconciled_amls().move_id)[0]
                         line_values.update({
-                            'advanceOriginalInvoice': advance_invoices.filtered(lambda m: last_reconciled_payment in m._get_reconciled_amls().move_id)[0].name,
+                            'advanceOriginalInvoice': paid_advance_invoice.name,
                             'advancePaymentDate': last_reconciled_payment.date,
-                            'advanceExchangeRate': last_reconciled_payment._l10n_hu_get_currency_rate(),
+                            'advanceExchangeRate': paid_advance_invoice._l10n_hu_get_currency_rate(),
                         })
 
             if line.display_type == 'product':
                 vat_tax = line.tax_ids.filtered(lambda t: t.l10n_hu_tax_type)
 
-                if line.quantity == 0.0 or line.discount == 100.0:
+                if float_is_zero(line.quantity, precision_digits=2) or float_compare(line.discount, 100.0, precision_digits=2) == 0:
                     price_unit_signed = 0.0
                 else:
                     price_unit_signed = sign * line.price_subtotal / (1 - line.discount / 100) / line.quantity

@@ -46,17 +46,27 @@ class Job(models.Model):
     manager_id = fields.Many2one(
         'hr.employee', related='department_id.manager_id', string="Department Manager",
         readonly=True, store=True)
-    user_id = fields.Many2one('res.users', "Recruiter",
-        domain="[('share', '=', False), ('company_ids', 'in', company_id)]", default=lambda self: self.env.user,
-        tracking=True, help="The Recruiter will be the default value for all Applicants in this job \
-            position. The Recruiter is automatically added to all meetings with the Applicant.")
+    user_id = fields.Many2one(
+        "res.users",
+        "Recruiter",
+        domain="[('share', '=', False), ('id', 'in', allowed_user_ids)]",
+        default=lambda self: self.env.user,
+        tracking=True,
+        help="The Recruiter will be the default value for all Applicants Recruiter's field in this job position. The Recruiter is automatically added to all meetings with the Applicant.",
+    )
+    allowed_user_ids = fields.Many2many('res.users', compute='_compute_allowed_user_ids', readonly=True)
     document_ids = fields.One2many('ir.attachment', compute='_compute_document_ids', string="Documents", readonly=True)
     documents_count = fields.Integer(compute='_compute_document_ids', string="Document Count")
     alias_id = fields.Many2one(help="Email alias for this job position. New emails will automatically create new applicants for this job position.")
     color = fields.Integer("Color Index")
     is_favorite = fields.Boolean(compute='_compute_is_favorite', inverse='_inverse_is_favorite')
     favorite_user_ids = fields.Many2many('res.users', 'job_favorite_user_rel', 'job_id', 'user_id', default=_get_default_favorite_user_ids)
-    interviewer_ids = fields.Many2many('res.users', string='Interviewers', domain="[('share', '=', False), ('company_ids', 'in', company_id)]", help="The Interviewers set on the job position can see all Applicants in it. They have access to the information, the attachments, the meeting management and they can refuse him. You don't need to have Recruitment rights to be set as an interviewer.")
+    interviewer_ids = fields.Many2many(
+        "res.users",
+        domain="[('id', 'in', allowed_user_ids)]",
+        string="Interviewers",
+        help="The Interviewers set on the job position can see all Applicants in it. They have access to the information, the attachments, the meeting management and they can refuse him. You don't need to have Recruitment rights to be set as an interviewer.",
+    )
     extended_interviewer_ids = fields.Many2many('res.users', 'hr_job_extended_interviewer_res_users', compute='_compute_extended_interviewer_ids', store=True)
     industry_id = fields.Many2one('res.partner.industry', 'Industry')
     date_from = fields.Date(help="Is set, update candidates availability once hired for that specific mission.")
@@ -106,6 +116,7 @@ class Job(models.Model):
               AND act.date_deadline <= %(today)s::date AND app.active
               AND app.job_id IN %(job_ids)s
               AND sta.hired_stage IS NOT TRUE
+              AND act.active
             GROUP BY app.job_id, act_state
         """, {
             'today': fields.Date.context_today(self),
@@ -131,6 +142,28 @@ class Job(models.Model):
             interviewers_by_job[result_raw['job_id'][0]] |= set(result_raw['interviewer_ids'])
         for job in self:
             job.extended_interviewer_ids = [(6, 0, list(interviewers_by_job[job.id]))]
+
+    @api.depends("company_id")
+    def _compute_allowed_user_ids(self):
+        company_ids = self.mapped("company_id.id")
+        domain = [("share", "=", False)]
+        if company_ids:
+            domain += [("company_ids", "in", company_ids)]
+
+        users_by_company = dict(
+            self.env["res.users"]._read_group(
+                domain=domain,
+                groupby=["company_ids"],
+                aggregates=["id:recordset"],
+            ),
+        )
+
+        all_users = self.env["res.users"]
+        for users in users_by_company.values():
+            all_users |= users
+
+        for job in self:
+            job.allowed_user_ids = users_by_company.get(job.company_id, all_users)
 
     def _compute_is_favorite(self):
         for job in self:
@@ -339,6 +372,12 @@ class Job(models.Model):
     def _creation_subtype(self):
         return self.env.ref('hr_recruitment.mt_job_new')
 
+    def _get_attachments_domain(self):
+        return ['|',
+            '&', ('res_model', '=', 'hr.job'), ('res_id', 'in', self.ids),
+            '&', ('res_model', '=', 'hr.applicant'), ('res_id', 'in', self.application_ids.ids),
+        ]
+
     def action_open_attachments(self):
         return {
             'type': 'ir.actions.act_window',
@@ -354,10 +393,7 @@ class Job(models.Model):
                 (self.env.ref('hr_recruitment.ir_attachment_hr_recruitment_list_view').id, 'list')
             ],
             'search_view_id': self.env.ref('hr_recruitment.ir_attachment_view_search_inherit_hr_recruitment').ids,
-            'domain': ['|',
-                '&', ('res_model', '=', 'hr.job'), ('res_id', 'in', self.ids),
-                '&', ('res_model', '=', 'hr.applicant'), ('res_id', 'in', self.application_ids.ids),
-            ],
+            'domain': self._get_attachments_domain(),
         }
 
     def action_open_activities(self):

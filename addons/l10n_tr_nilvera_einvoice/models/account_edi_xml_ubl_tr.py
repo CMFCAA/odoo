@@ -26,6 +26,9 @@ class AccountEdiXmlUblTr(models.AbstractModel):
             prefix, year, number = parts[0], parts[1], parts[2].zfill(9)
             return f"{prefix.upper()}{year}{number}"
 
+        if invoice._l10n_tr_nilvera_einvoice_check_negative_lines():
+            raise UserError(_("Nilvera portal cannot process negative quantity nor negative price on invoice lines"))
+
         # EXTENDS account.edi.xml.ubl_21
         vals = super()._export_invoice_vals(invoice)
 
@@ -49,7 +52,7 @@ class AccountEdiXmlUblTr(models.AbstractModel):
             'uuid': invoice.l10n_tr_nilvera_uuid,
             'document_type_code': 'SATIS' if invoice.move_type == 'out_invoice' else 'IADE',
             'due_date': False,
-            'line_count_numeric': len(invoice.line_ids),
+            'line_count_numeric': len(invoice.line_ids.filtered(lambda line: line.display_type == 'product')),
             'order_issue_date': invoice.invoice_date,
             'pricing_currency_code': invoice.currency_id.name.upper() if invoice.currency_id != invoice.company_id.currency_id else False,
             'currency_dp': 2,
@@ -68,7 +71,7 @@ class AccountEdiXmlUblTr(models.AbstractModel):
     def _l10n_tr_get_amount_integer_partn_text_note(self, amount, currency):
         sign = math.copysign(1.0, amount)
         amount_integer_part, amount_decimal_part = divmod(abs(amount), 1)
-        amount_decimal_part = int(amount_decimal_part * 100)
+        amount_decimal_part = round(amount_decimal_part * 100)
 
         text_i = num2words(amount_integer_part * sign, lang="tr") or 'Sifir'
         text_d = num2words(amount_decimal_part * sign, lang="tr") or 'Sifir'
@@ -102,6 +105,18 @@ class AccountEdiXmlUblTr(models.AbstractModel):
             },
             'id': partner.vat,
         })
+
+        official_categories = partner.category_id._get_l10n_tr_official_categories()
+        for category in partner.category_id:
+            if category.parent_id not in official_categories:
+                continue
+            vals.append({
+                'id_attrs': {
+                    'schemeID': category.parent_id.name,
+                },
+                'id': category.name,
+            })
+
         return vals
 
     def _get_partner_address_vals(self, partner):
@@ -117,14 +132,29 @@ class AccountEdiXmlUblTr(models.AbstractModel):
 
     def _get_partner_party_tax_scheme_vals_list(self, partner, role):
         # EXTENDS account.edi.xml.ubl_21
+        # Cleans the PartyTaxScheme node values for Turkey (TR).
+        #
+        # Expected XML structure:
+        # <cac:PartyTaxScheme t-foreach="vals.get('party_tax_scheme_vals', [])" t-as="foreach_vals">
+        #     <cac:TaxScheme>
+        #         <cbc:Name>TAX OFFICE NAME</cbc:Name>
+        #     </cac:TaxScheme>
+        # </cac:PartyTaxScheme>
+        #
+        # Note: Adding any extra nodes may cause blocking validation errors on Nilvera's side
+        # when tax office is not set on E-Archive Invoice.
+
         vals_list = super()._get_partner_party_tax_scheme_vals_list(partner, role)
         for vals in vals_list:
             vals.pop('registration_address_vals', None)
+            vals.pop('registration_name', None)
+            vals.pop('company_id', None)
+            vals.pop('tax_level_code', None)
             vals["tax_scheme_vals"].update(
                 {
                     "id": "",
                     "name": partner.ref,
-                }
+                },
             )
         return vals_list
 
@@ -241,6 +271,8 @@ class AccountEdiXmlUblTr(models.AbstractModel):
         # EXTENDS account.edi.xml.ubl_21
         line_item_vals = super()._get_invoice_line_item_vals(line, taxes_vals)
         line_item_vals['classified_tax_category_vals'] = False
+        # standard_item_identification_vals not supported in UBL TR
+        line_item_vals.pop('standard_item_identification_vals')
         return line_item_vals
 
     def _get_additional_document_reference_list(self, invoice):
@@ -260,6 +292,7 @@ class AccountEdiXmlUblTr(models.AbstractModel):
         for vals in vals_list:
             vals.pop('allowance_charge_reason_code', None)
             vals['currency_dp'] = 2
+            vals['multiplier_factor'] = line.discount / 100 if line.discount else 0
         return vals_list
 
     def _get_invoice_line_price_vals(self, line):
@@ -299,9 +332,9 @@ class AccountEdiXmlUblTr(models.AbstractModel):
         })
         return partner_vals
 
-    def _import_fill_invoice_form(self, invoice, tree, qty_factor):
+    def _import_fill_invoice(self, invoice, tree, qty_factor):
         # EXTENDS account.edi.xml.ubl_20
-        logs = super()._import_fill_invoice_form(invoice, tree, qty_factor)
+        logs = super()._import_fill_invoice(invoice, tree, qty_factor)
 
         # ==== Nilvera UUID ====
         if uuid_node := tree.findtext('./{*}UUID'):

@@ -5,7 +5,12 @@ from odoo import models, fields, api
 class AccountMove(models.Model):
     _inherit = 'account.move'
 
-    taxable_supply_date = fields.Date(default=fields.Date.today())
+    taxable_supply_date = fields.Date(compute='_compute_taxable_supply_date', store=True, readonly=False, precompute=True)
+
+    @api.depends('country_code')
+    def _compute_taxable_supply_date(self):
+        for move in self.filtered(lambda m: m.country_code == 'CZ' and not m.taxable_supply_date):
+            move.taxable_supply_date = fields.Date.context_today(move)
 
     @api.depends('taxable_supply_date')
     def _compute_date(self):
@@ -28,3 +33,9 @@ class AccountMove(models.Model):
         if self.country_code == 'CZ' and self.taxable_supply_date:
             return self.taxable_supply_date
         return super()._get_invoice_currency_rate_date()
+
+    def _get_default_currency_rate_date(self):
+        self.ensure_one()
+        if self.country_code == 'CZ' and self.taxable_supply_date:
+            return self.taxable_supply_date
+        return super()._get_default_currency_rate_date()

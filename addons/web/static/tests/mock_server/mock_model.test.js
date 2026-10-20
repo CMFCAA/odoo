@@ -21,6 +21,7 @@ class Oui extends models.Model {
 }
 
 defineModels([Oui]);
+describe.current.tags("headless");
 
 test("model name can be implicitly extracted from its constructor name", async () => {
     const [AnonymousClass, Foo, ResCurrency, ResPartner] = [
@@ -61,6 +62,8 @@ test("models can be extended by having the same name", async () => {
     class First extends models.Model {
         _name = "same.model";
 
+        description = fields.Char();
+
         same_method() {
             return "1";
         }
@@ -68,6 +71,8 @@ test("models can be extended by having the same name", async () => {
 
     class Second extends models.Model {
         _name = "same.model";
+
+        description = fields.Text();
 
         second_method() {
             return "added by 2";
@@ -80,6 +85,8 @@ test("models can be extended by having the same name", async () => {
 
     class Third extends models.Model {
         _name = "same.model";
+
+        title = fields.Char();
 
         third_method() {
             return "added by 3";
@@ -94,21 +101,25 @@ test("models can be extended by having the same name", async () => {
 
     await makeMockEnv();
 
+    expect(MockServer.env["same.model"]).toBeInstanceOf(Second);
+    expect(MockServer.env["same.model"]._fields.description.type).toBe("text");
+    expect(MockServer.env["same.model"]._fields).not.toInclude("title");
+
     const orm = getService("orm");
 
     await expect(orm.call("same.model", "same_method")).resolves.toBe("1 & 2");
     await expect(orm.call("same.model", "second_method")).resolves.toBe("added by 2");
     await expect(orm.call("same.model", "third_method")).rejects.toThrow();
 
-    expect(MockServer.env["same.model"]).toBeInstanceOf(Second);
-
     defineModels([Third]);
+
+    expect(MockServer.env["same.model"]).toBeInstanceOf(Third);
+    expect(MockServer.env["same.model"]._fields.description.type).toBe("text");
+    expect(MockServer.env["same.model"]._fields.title.type).toBe("char");
 
     await expect(orm.call("same.model", "same_method")).resolves.toBe("overridden by 3");
     await expect(orm.call("same.model", "second_method")).resolves.toBe("added by 2");
     await expect(orm.call("same.model", "third_method")).resolves.toBe("added by 3");
-
-    expect(MockServer.env["same.model"]).toBeInstanceOf(Third);
 });
 
 test("cannot access _records on models after init", async () => {
@@ -120,6 +131,20 @@ test("cannot access _records on models after init", async () => {
     expect(Oui._records).toHaveLength(0);
     expect(env["oui"]).toBe(MockServer.env["oui"]);
     expect(env["oui"]).toHaveLength(1);
+});
+
+test("can create generic field", async () => {
+    Oui._fields.generic = fields.Generic({ type: "blublu" });
+
+    const { env } = await makeMockServer();
+
+    expect(env["oui"]._fields.generic.type).toBe("blublu");
+});
+
+test("cannot create generic field without type", async () => {
+    Oui._fields.generic = fields.Generic();
+
+    await expect(makeMockServer()).rejects.toThrow(/missing key/i);
 });
 
 describe("level 1", () => {
@@ -147,10 +172,11 @@ describe("level 1", () => {
         await makeMockEnv();
 
         await expect(
-            getService("orm").searchRead("oui", [], ["id", "name", "age", "surname"])
+            getService("orm").searchRead("oui", [], ["id", "name", "age", "surname", "create_date"])
         ).resolves.toEqual([
             {
                 id: 1,
+                create_date: luxon.DateTime.utc().toSQL().slice(0, 19),
                 name: "John Doe",
                 age: 42,
                 surname: "doedoe",

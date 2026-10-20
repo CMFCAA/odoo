@@ -4,12 +4,14 @@ import base64
 import hashlib
 import io
 import os
+from unittest.mock import patch
 
 from PIL import Image
 
 import odoo
-from odoo.exceptions import AccessError
+from odoo.exceptions import AccessError, ValidationError
 from odoo.addons.base.tests.common import TransactionCaseWithUserDemo
+from odoo.tests import new_test_user
 from odoo.tools import mute_logger
 from odoo.tools.image import image_to_base64
 
@@ -265,6 +267,44 @@ class TestIrAttachment(TransactionCaseWithUserDemo):
         self.assertEqual(a1.raw, unique_blob)
         self.assertEqual(a1.mimetype, 'image/png')
 
+    def test_15_read_bin_size_doesnt_read_datas(self):
+        self.env.invalidate_all()
+        IrAttachment = self.registry['ir.attachment']
+        main_partner = self.env.ref('base.main_partner')
+        with patch.object(
+            IrAttachment,
+            '_file_read',
+            side_effect=IrAttachment._file_read,
+            autospec=True,
+        ) as patch_file_read:
+            self.env['res.partner'].with_context(bin_size=True).search_read(
+                [('id', 'in', main_partner.ids)], ['image_128']
+            )
+            self.assertEqual(patch_file_read.call_count, 0)
+
+    def test_16_create_unique_only_reuses_writable_attachments(self):
+        """ create_unique() must not return an attachment the current user cannot write, as
+        callers link new attachments to it (e.g. the resized variants of an uploaded image).
+        """
+        user_other = new_test_user(self.env, login='other_user', groups='base.group_user')
+        vals = {'name': 'image.webp', 'datas': self.blob1_b64, 'mimetype': 'image/webp'}
+        # attachment of another user, not linked to any record (like an image variant)
+        attachment_other = self.Attachment.with_user(user_other).create({**vals, 'public': True})
+
+        Attachment = self.Attachment.with_user(self.user_demo)
+        attachment_ids = Attachment.create_unique([vals])
+        self.assertNotIn(attachment_other.id, attachment_ids)
+        # a variant can be linked to the returned attachment, as the image field does
+        Attachment.create({
+            'name': 'image.jpg',
+            'datas': self.blob2_b64,
+            'mimetype': 'image/jpeg',
+            'res_model': 'ir.attachment',
+            'res_id': attachment_ids[0],
+        })
+        # the attachments of the current user are still reused
+        self.assertEqual(Attachment.create_unique([vals]), attachment_ids)
+
 
 class TestPermissions(TransactionCaseWithUserDemo):
     def setUp(self):
@@ -403,3 +443,16 @@ class TestPermissions(TransactionCaseWithUserDemo):
         # even from a record with write permissions
         with self.assertRaises(AccessError):
             copied.copy({'res_model': unwritable._name, 'res_id': unwritable.id})
+
+    def test_circular_attachment(self):
+        """An ir.attachment should not be attached to itself with
+        its res_id. Upon write a UserError should be thrown.
+        """
+
+        Attachment = self.env['ir.attachment']
+        document = Attachment.create({'name': 'document'})
+        with self.assertRaises(ValidationError):
+            document.write({
+                'res_model': 'ir.attachment',
+                'res_id': document.id
+            })
